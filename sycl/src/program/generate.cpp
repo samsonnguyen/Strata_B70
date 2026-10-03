@@ -4932,6 +4932,20 @@ int main(int argc, char **argv) try {
                 if (std::strcmp(key, "MemAvailable:") == 0) { avail = kb << 10; break; }
             std::fclose(f);
         }
+        // An adaptive swap evicts a resident expert into the "missing" set. An evicted expert that is not mirrored cannot be
+        // reached by the GPU on its own, the device plan then waits for the host to compute it, and on the A770 the
+        // device-to-host handshake does not hold: the GPU's bounded wait gives up and the window carries on with garbage
+        // that the recurrent state keeps for good. So when swaps are on, mirror the resident experts too, after the
+        // misses and within the same cap (STRATA_MIRROR_ALL=1 forces it; STRATA_MIRROR_ALL=0 leaves it off).
+        const char* mirror_all_env = std::getenv("STRATA_MIRROR_ALL");
+        const bool mirror_all = mirror_all_env != nullptr ? mirror_all_env[0] != '0' : (o.adapt_every > 0 && o.adapt_swaps > 0);
+        if (mirror_all) {
+            // every resident expert follows the real misses, which replaces the prompt loan's tail entries above (they
+            // are resident experts too) so that none is mirrored twice
+            miss.resize(n_true_miss);
+            for (const auto& pr : profile)
+                if (pr.first < mirror_end && xcache.slot_of(pr.first, pr.second) != strata::core::kNotResident) miss.push_back({pr.first, pr.second});
+        }
         const char* mv = std::getenv("STRATA_MIRROR_MIB");
         const uint64_t cap = mv ? (uint64_t) std::atoll(mv) << 20 : (avail > (4ull << 30) ? avail - (4ull << 30) : 0);
         if (!miss.empty() && cap > 0) {
@@ -4968,7 +4982,12 @@ int main(int argc, char **argv) try {
         // The same rule after the start: the mirror holds the start's misses only, so an expert an adaptive swap moves
         // out of VRAM would be in neither, and the device plan would wait for a host that never serves it (every token
         // 0 after a --batch window had counted misses and the tier swapped).
-        if (!miss.empty() && no_host && o.adapt_every > 0 && o.adapt_swaps > 0) {
+        // With every resident expert mirrored (STRATA_MIRROR_ALL) a swap's victim is always reachable, so the swaps stay on.
+        bool full_mirror = mirror_all && mirror_end == g.n_layers && gguf_src.mirrored_bytes() > 0;
+        for (int64_t l = 0; full_mirror && l < g.n_layers; ++l)
+            for (int64_t e = 0; full_mirror && e < g.n_expert; ++e)
+                if (!gguf_src.pinned(l, e)) full_mirror = false;
+        if (!miss.empty() && no_host && o.adapt_every > 0 && o.adapt_swaps > 0 && !full_mirror) {
             std::fprintf(stderr, "strata generate: adaptive swaps off: with STRATA_VERIFY_NO_HOST an expert they move out of "
                                  "VRAM would be neither there nor mirrored\n");
             o.adapt_every = 0;
