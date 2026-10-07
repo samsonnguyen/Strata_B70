@@ -11,6 +11,10 @@
 #                      image's level_zero:0 for one card (#423)
 #   STRATA_SYCL_RUNNER docker (the image, default); native - already inside a toolbox with oneAPI where the data root
 #                      is /work (the server runs there too); distrobox:<name> - from the host, in that distrobox
+# Passed into the container: every variable of this script's environment that starts with STRATA_ (the config's
+# "env" block arrives that way: the server puts it in the engine's environment), ONEAPI_ (level_zero:* for a
+# two-card split, #423), UR_, IGC_, SYCL_ or ZES_. The port's own defaults (below) are overridden the same way,
+# e.g. "env": {"STRATA_VERIFY_NO_HOST": "0"} in the config.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/../.." && pwd)                 # the repo
 root=${STRATA_SYCL_ROOT:-$(dirname "$here")}
@@ -23,11 +27,25 @@ for a in "$@"; do
     if [ "$a" = --layer-split ]; then split=1; fi
 done
 selector=${ONEAPI_DEVICE_SELECTOR:-${split:+level_zero:gpu}}
-env_args=(-e STRATA_VERIFY_DEVICE_PLAN=1 -e STRATA_VERIFY_NO_HOST=1 -e STRATA_STAGER_THREADS=12)
-if [ -n "$selector" ]; then env_args+=(-e "ONEAPI_DEVICE_SELECTOR=$selector"); fi
-# the port's run-time switches: the device-built verify plan without host handshakes (docs/INTEL.md)
-env="STRATA_VERIFY_DEVICE_PLAN=1 STRATA_VERIFY_NO_HOST=1 STRATA_STAGER_THREADS=12 ONEAPI_DEVICE_SELECTOR=${selector:-level_zero:0}"
-run="set +u; . /opt/intel/oneapi/setvars.sh >/dev/null 2>&1; export $env; cd $repo_in && exec ${STRATA_SYCL_BIN:-build-sycl-aot/strata}$args"
+# the port's run-time switches: the device-built verify plan, and no host handshakes in it. NO_HOST is for a card on
+# the xe driver (the host<->GPU flag stores are not visible there); an i915 card (Arc A-series) runs without it
+# (docs/INTEL.md)
+declare -A setting=([STRATA_VERIFY_DEVICE_PLAN]=1 [STRATA_VERIFY_NO_HOST]=1 [STRATA_STAGER_THREADS]=12)
+[ -n "$selector" ] && setting[ONEAPI_DEVICE_SELECTOR]=$selector
+while IFS= read -r k; do
+    case "$k" in
+        STRATA_SYCL_*) ;;                                 # this script's own settings
+        STRATA_*|ONEAPI_*|UR_*|IGC_*|SYCL_*|ZES_*|NEOReadDebugKeys|OverrideDefaultFP64Settings) setting[$k]=${!k} ;;
+    esac
+done < <(compgen -e)
+envs=()
+env=""
+for k in "${!setting[@]}"; do
+    # the engine tests the switches by presence: a value of 0 (or empty) means "not set", so it is not passed on
+    case "${setting[$k]}" in 0|"") ;; *) envs+=(-e "$k=${setting[$k]}"); env+=" $k=$(printf '%q' "${setting[$k]}")" ;; esac
+done
+[ -n "${setting[ONEAPI_DEVICE_SELECTOR]:-}" ] || env+=" ONEAPI_DEVICE_SELECTOR=level_zero:0"
+run="set +u; . /opt/intel/oneapi/setvars.sh >/dev/null 2>&1; export$env; cd $repo_in && exec ${STRATA_SYCL_BIN:-build-sycl-aot/strata}$args"
 case "${STRATA_SYCL_RUNNER:-docker}" in
 native) exec bash -c "$run" ;;
 distrobox:?*) exec distrobox enter "${STRATA_SYCL_RUNNER#distrobox:}" -- bash -c "$run" ;;
@@ -35,6 +53,6 @@ esac
 docker rm -f "$name" >/dev/null 2>&1 || true              # a container left behind by a killed server
 exec docker run --rm -i --name "$name" --device /dev/dri --oom-score-adj 1000 --stop-timeout 30 --no-healthcheck \
     -v "$root:/work" \
-    "${env_args[@]}" \
+    "${envs[@]}" \
     "${STRATA_SYCL_IMAGE:-strata-sycl-dev}" \
     "cd $repo_in && exec ${STRATA_SYCL_BIN:-build-sycl-aot/strata}$args"

@@ -106,6 +106,7 @@ class Tokenizer:
                 if ty in (3, 4):
                     self.special_tokens[tokens[i]] = i
         always = [t for t, i in self.special_tokens.items() if token_types and token_types[i] == 4]
+        self.control_tokens = [t for t, i in self.special_tokens.items() if token_types and token_types[i] == 3]
         # Longest literal first, or `<|im_end|>` could match a shorter prefix of itself.  `regex.escape` so a
         # token containing regex metacharacters (several do: `<|`, `[`, `(`) is matched literally.
         self._always_re = self._alt(always)
@@ -149,11 +150,16 @@ class Tokenizer:
         """
         if len(word) > self.HEAP_MIN:
             return self._bpe_heap(word)
+        # `self` is read ONCE, here.  #1385: an interpreter (CPython 3.14.4) was seen handing this frame an int
+        # for `self` partway through the scan (`'int' object has no attribute 'ranks'`).  Nothing in this class
+        # can do that (no cache, decorator, slots or callback; a thread hammering test cannot make it happen),
+        # so the scan below works on a local and no longer re-reads `self` once per symbol pair.
+        ranks_get = self.ranks.get
         parts = list(word)
         while len(parts) > 1:
             best, best_rank = None, None
             for i in range(len(parts) - 1):
-                r = self.ranks.get((parts[i], parts[i + 1]))
+                r = ranks_get((parts[i], parts[i + 1]))
                 if r is not None and (best_rank is None or r < best_rank):
                     best, best_rank = i, r
             if best is None:
