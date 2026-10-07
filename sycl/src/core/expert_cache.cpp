@@ -600,7 +600,7 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert,
 }
 
 bool ExpertCache::open_storage(int64_t n_slots, int64_t n_layers, int64_t n_expert,
-                               int64_t blob_bytes, std::string &err) try {
+                               int64_t blob_bytes, std::string &err) {
     close();
     if (n_slots <= 0) {
         err = "ExpertCache: n_slots must be positive";
