@@ -3,7 +3,7 @@ name: sycl-image
 
 on:
   push:
-    branches: [a770-dg2]
+    branches: [a770-dg2, a770-on-main]
     paths: ["sycl/**", "src/**", "include/**", "serve/**", "tools/**", "data/**", ".github/workflows/sycl-image.yml"]
   workflow_dispatch:
     inputs:
@@ -43,4 +43,4 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE }}:${{ github.sha }}
-            ${{ env.IMAGE }}:${{ inputs.tag || 'a770-dg2' }}
+            ${{ env.IMAGE }}:${{ inputs.tag || github.ref_name }}
